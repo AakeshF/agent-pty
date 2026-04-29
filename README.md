@@ -51,6 +51,24 @@ agent-pty kill demo
 
 `agent-pty list` shows currently-managed sessions. `agent-pty <subcommand> --help` for per-command flags.
 
+## MCP server (for Claude Code and other agents)
+
+The package ships an MCP server (`agent-pty-mcp`) that exposes the API as native tool calls over stdio JSON-RPC. Tools registered: `pty_spawn`, `pty_send`, `pty_snapshot`, `pty_wait_for`, `pty_list`, `pty_kill`.
+
+Add to `~/.claude.json` (or `.claude/settings.json` for project-scoped):
+
+```json
+{
+  "mcpServers": {
+    "agent-pty": {
+      "command": "/absolute/path/to/.venv/bin/agent-pty-mcp"
+    }
+  }
+}
+```
+
+Restart Claude Code; the agent will see the tools. Validate with the smoke script: `python examples/mcp_smoke.py` — exercises the full stdio roundtrip against the real server.
+
 ## Problem
 
 LLM coding agents operate terminals as if terminals were stateless and non-interactive. They aren't. A terminal is a persistent, stateful, bidirectional interactive medium with a real PTY, ANSI redraws, a live cursor, and programs that expect to be talked to in real time. The current "send a shell command, get stdout back" model — what every agent uses — is a degenerate projection of that medium. It works for ~90% of one-shot tasks and falls apart the moment something asks a question back, redraws its screen, or expects the same shell to remember anything about the last command.

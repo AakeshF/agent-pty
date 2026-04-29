@@ -5,6 +5,7 @@ description = "Persistent PTY tool for LLM coding agents, tmux-backed"
 requires-python = ">=3.11"
 dependencies = [
     "libtmux>=0.36",
+    "mcp>=1.2",
 ]
 
 [project.optional-dependencies]
@@ -12,6 +13,7 @@ dev = ["pytest>=8"]
 
 [project.scripts]
 agent-pty = "agent_pty.cli:main"
+agent-pty-mcp = "agent_pty.mcp:main"
 
 [build-system]
 requires = ["hatchling"]
