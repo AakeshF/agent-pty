@@ -55,19 +55,14 @@ agent-pty kill demo
 
 The package ships an MCP server (`agent-pty-mcp`) that exposes the API as native tool calls over stdio JSON-RPC. Tools registered: `pty_spawn`, `pty_send`, `pty_snapshot`, `pty_wait_for`, `pty_list`, `pty_kill`.
 
-Add to `~/.claude.json` (or `.claude/settings.json` for project-scoped):
+Register with the Claude Code CLI:
 
-```json
-{
-  "mcpServers": {
-    "agent-pty": {
-      "command": "/absolute/path/to/.venv/bin/agent-pty-mcp"
-    }
-  }
-}
+```bash
+claude mcp add --scope user agent-pty /absolute/path/to/.venv/bin/agent-pty-mcp
+claude mcp list   # should show agent-pty as healthy
 ```
 
-Restart Claude Code; the agent will see the tools. Validate with the smoke script: `python examples/mcp_smoke.py` — exercises the full stdio roundtrip against the real server.
+Restart Claude Code; the agent will see the tools natively. Validate the server itself with the smoke script: `python examples/mcp_smoke.py` — exercises the full stdio roundtrip independent of any MCP client.
 
 ## Problem
 
