@@ -24,3 +24,7 @@ packages = ["agent_pty"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "manual: tests that require external services (e.g. real claude CLI); skipped by default in CI",
+]
+addopts = "-m 'not manual'"

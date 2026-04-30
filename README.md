@@ -64,6 +64,10 @@ claude mcp list   # should show agent-pty as healthy
 
 Restart Claude Code; the agent will see the tools natively. Validate the server itself with the smoke script: `python examples/mcp_smoke.py` — exercises the full stdio roundtrip independent of any MCP client.
 
+## Roadmap
+
+The core (M1–M5) is shipped and frozen. **M6 — mesh** adds an opt-in orchestration layer for the [Captain Kirk pattern](docs/captain-kirk-pattern.md): one agent driving N agents in other panes, with done-detection, push-event subscriptions, blocked-on-prompt detection, incremental snapshots, cross-pane piping, and lifecycle notifications. Lives in `agent_pty/mesh.py` with parallel `mesh_*` MCP tools; core API unchanged. See [docs/build-plan.md](docs/build-plan.md#m6--mesh-orchestration-across-sessions) for the full milestone with acceptance tests.
+
 ## Problem
 
 LLM coding agents operate terminals as if terminals were stateless and non-interactive. They aren't. A terminal is a persistent, stateful, bidirectional interactive medium with a real PTY, ANSI redraws, a live cursor, and programs that expect to be talked to in real time. The current "send a shell command, get stdout back" model — what every agent uses — is a degenerate projection of that medium. It works for ~90% of one-shot tasks and falls apart the moment something asks a question back, redraws its screen, or expects the same shell to remember anything about the last command.

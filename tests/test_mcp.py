@@ -29,7 +29,8 @@ def _list_tools():
 def test_all_expected_tools_registered():
     tools = _list_tools()
     names = {t.name for t in tools}
-    assert names == EXPECTED_TOOLS
+    missing = EXPECTED_TOOLS - names
+    assert not missing, f"missing core pty tools: {missing}"
 
 
 def test_each_tool_has_description():

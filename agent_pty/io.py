@@ -16,7 +16,11 @@ def _get_pane(name: str) -> libtmux.Pane:
     full = _full(name)
     if not _has(server, full):
         raise SessionNotFoundError(f"Session {name!r} not found")
-    session = server.sessions.get(session_name=full)
+    try:
+        session = server.sessions.get(session_name=full)
+    except Exception:
+        # TOCTOU: session disappeared between the _has check and .get()
+        raise SessionNotFoundError(f"Session {name!r} not found")
     return session.active_window.active_pane
 
 

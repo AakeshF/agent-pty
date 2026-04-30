@@ -1,6 +1,6 @@
 # Build plan
 
-Five milestones, smallest useful slice first. Each milestone has concrete acceptance tests that run against a real tmux server — no mocks for the tmux integration surface, since the whole point of this project is empirical correctness against tmux's actual behavior.
+Six milestones. M1–M5 ship the core PTY transport (already complete). M6 adds the **mesh** layer — orchestration over multiple sessions, the load-bearing primitive for the [Captain Kirk pattern](captain-kirk-pattern.md). Each milestone has concrete acceptance tests that run against a real tmux server — no mocks for the tmux integration surface, since the whole point of this project is empirical correctness against tmux's actual behavior.
 
 ## Stack decisions
 
@@ -17,11 +17,15 @@ Five milestones, smallest useful slice first. Each milestone has concrete accept
     wait.py            wait_for (M3)
     keys.py            named-key parser (M4)
     cli.py             optional CLI for manual testing
+    schema.py          JSON schema for tool integration (M5)
+    mcp.py             MCP server exposing pty_* tools (M5)
+    mesh.py            orchestration layer over multiple sessions (M6)
   tests/
     test_session.py
     test_io.py
     test_wait.py
     test_keys.py
+    test_mesh.py
     test_integration.py  drives real REPLs/TUIs end-to-end
   ```
 
@@ -148,13 +152,76 @@ Literal `<` is escaped as `<<`.
 
 ---
 
+## M6 — Mesh: orchestration across sessions
+
+**Goal:** make the [Captain Kirk pattern](captain-kirk-pattern.md) — one agent driving N agents in other panes — practical, not just possible. Adds done-detection, push events, blocked-on-prompt detection, incremental snapshots, cross-pane piping, and lifecycle notifications. Lives in `agent_pty/mesh.py`; opt-in, no impact on the core API.
+
+**Design principles:**
+- Core API (M1–M5) is frozen. Mesh composes on top, never changes core signatures.
+- Sentinel framing in v1 (callers prompt sub-agents to terminate replies with a marker). Designed so a future structured-output mode in agent CLIs can replace sentinels without breaking callers.
+- Async by nature (subscriptions, lifecycle events). Provide a minimal blocking shim where parity with the core matters.
+
+**API (sketch — to be refined during M6 design before any code):**
+```python
+Mesh.send_with_done(name: str, text: str,
+                    done_marker: str = "<<END>>",
+                    timeout: float = 60.0) -> str
+    # send → wait for marker → return reply text bounded by it
+
+Mesh.subscribe(name: str, pattern: str | re.Pattern) -> AsyncIterator[str]
+    # yields snapshot each time pattern hits; cancellable
+
+Mesh.detect_blocked(name: str) -> str | None
+    # returns hint ("password:", "[y/n]", "Allow tool?") or None
+
+Mesh.snapshot_since(name: str, marker: str) -> str
+    # text appended after the most recent occurrence of marker
+
+Mesh.pipe(from_name: str, to_name: str,
+          region: str = "last_reply") -> None
+    # copy region from one session into another's input stream
+
+Mesh.lifecycle_events() -> AsyncIterator[Event]
+    # session_born, session_died, session_idle, session_busy
+```
+
+**Acceptance tests (`tests/test_mesh.py`):**
+
+1. **Done-detection round-trip.** Spawn a shell, send `printf 'reply text\n<<END>>\n'` framed via `send_with_done`. Returned string equals `"reply text"` (sentinel stripped, leading/trailing whitespace trimmed). Subsequent unrelated output on screen does not leak into the return.
+2. **Subscription latency.** Subscribe to `"ERROR"` in pane A; 200ms later send a line containing `"ERROR"`. Subscription yields within 250ms of the send (proves push, not >150ms-interval polling).
+3. **Subscription cancellation.** Cancelling an active subscription stops yielding within 100ms; tmux pipe is torn down (verify with `tmux list-panes -F`).
+4. **Blocked detection — sudo.** Spawn `sudo -k -S true`; within 500ms `detect_blocked` returns a string containing `"password"`.
+5. **Blocked detection — y/n prompt.** Spawn a shell, run a script that prints `"Continue? [y/N]"` and reads stdin; `detect_blocked` returns a hint mentioning the prompt within 500ms.
+6. **Blocked detection — false positive guard.** A session running `top` (busy redrawing, no input expected) returns `None` from `detect_blocked`.
+7. **Snapshot since.** Send 5 commands, capture marker via the most recent prompt, send 5 more; `snapshot_since(marker)` returns only the latter 5's output, with no overlap from the first batch.
+8. **Pipe between panes.** Spawn panes A and B. Run `echo hi` in A; call `pipe("a", "b")`. Pane B's screen contains `"hi"` within 250ms. The captain's process never read `"hi"` itself (verifies the bypass — assert via instrumentation in the mesh layer).
+9. **Lifecycle: birth + death.** Subscribe to `lifecycle_events()`; spawn pane C; expect `session_born("c")` event. Externally `tmux kill-session -t agent-pty-c`; expect `session_died("c")` within 500ms.
+10. **Lifecycle: idle/busy heuristic.** Spawn a shell pane, no activity for 2s → `session_idle("x")` fires. Send a long-running command → `session_busy("x")` fires within 500ms.
+11. **MCP surface parity.** Each Python `Mesh.*` method has a matching `mesh_*` MCP tool registered by `agent-pty-mcp`. Smoke test: drive each tool over JSON-RPC stdio.
+12. **Captain-Kirk integration (manual / opt-in).** Drive a real `claude` instance in a sub-pane: `send_with_done` using sentinel convention returns a non-empty reply. Marked `@pytest.mark.manual` because it requires a working `claude` install and an API key; not in default CI.
+
+**Implementation notes:**
+- Subscriptions are backed by a per-subscription background thread polling `capture-pane` at 25ms (4× faster than `wait_for`'s 50ms loop). This delivers the push-style ergonomics callers want — an iterator that yields when patterns hit — without the engineering cost of `tmux pipe-pane` plumbing for v1. If 25ms latency proves insufficient or the polling cost shows up under many concurrent subscriptions, the implementation switches to `tmux pipe-pane` later without changing the public API.
+- Blocked detection is heuristic (regex over the bottom 3 non-empty lines of the screen) and explicitly best-effort. False positives possible (e.g. a `read -p "Continue?"` script). False negatives possible (custom prompts).
+- The pipe primitive uses `tmux send-keys` to inject the source region into the destination; the captain's tokens never see the payload as a return value. Newlines in the payload become Enter presses on the destination — caller is responsible for sanitization.
+- Lifecycle events: a single shared `_LifecycleMonitor` thread polls `list_sessions()` and `snapshot()` at 500ms cadence and fans events out to all open `LifecycleStream` listeners. Idle threshold = 2.0s of unchanged screen.
+- `<<` in the public API: any input text containing literal `<` characters round-trips correctly. `send_with_done` and `pipe` escape `<` → `<<` before calling `Pty.send`, so the named-key parser doesn't fire on user content. This is invisible to callers — they pass plain strings.
+
+**Out of scope for M6:**
+- Permission auto-approval policy (mesh detects blocked state; what to do about it is captain logic)
+- Recursion depth enforcement (handled by env var convention, not the mesh API)
+- Cross-machine / network mesh (local tmux only, same as the core)
+
+---
+
 ## Out of scope (explicit non-goals)
 
 - Window/pane multiplexing surface (tmux's job; agent gets one screen per session)
 - Resize-after-spawn (set on spawn, immutable for v1)
-- Output streaming via callbacks/events (snapshot + wait_for is enough for v1)
 - Authentication, multi-user, network-attached sessions (local sockets only)
 - Replacing `Bash` for stateless one-shot commands
+
+(Output streaming / push events were a v1 non-goal; promoted to **M6** as the load-bearing primitive for orchestration.)
 
 ## Risk register
 
@@ -164,3 +231,7 @@ Literal `<` is escaped as `<<`.
 | Curses redraws miss snapshot timing | `wait_for` solves the only case where this matters in practice |
 | Race: `send` returns before keys are processed | `send` is fire-and-forget; pair with `wait_for` for sync points (this is the documented contract) |
 | Session names collide with user's other tmux sessions | `agent-pty-` prefix on the actual tmux name |
+| **M6:** sub-agent ignores sentinel convention, `send_with_done` hangs to timeout | Document expected sentinel; `send_with_done` always returns within `timeout`; design API so structured-output replacement is a non-breaking change |
+| **M6:** `tmux pipe-pane` semantics shift across versions | Pin behavior to tmux ≥3.5; integration test on supported floor in CI |
+| **M6:** scope creep — mesh swallows the whole project | Core API frozen by contract. Mesh lives in its own module and MCP namespace. Any change to `Pty.*` requires explicit milestone, not a side effect of mesh work |
+| **M6:** captain-kirk works in demos, falls apart at scale (token cost, brittleness) | Acceptance tests #2/#8/#9 cover the realistic-load failure modes; honest cost section in [captain-kirk-pattern.md](captain-kirk-pattern.md) sets expectations |

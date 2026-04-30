@@ -1,5 +1,11 @@
 from agent_pty.io import send, snapshot
 from agent_pty.keys import KeyParseError
+from agent_pty.mesh import (
+    LifecycleEvent,
+    LifecycleStream,
+    Mesh,
+    Subscription,
+)
 from agent_pty.session import (
     SessionExistsError,
     SessionNotFoundError,
@@ -21,9 +27,13 @@ class Pty:
 
 __all__ = [
     "KeyParseError",
+    "LifecycleEvent",
+    "LifecycleStream",
+    "Mesh",
     "Pty",
     "SessionExistsError",
     "SessionNotFoundError",
+    "Subscription",
     "kill",
     "list_sessions",
     "send",
