@@ -53,7 +53,7 @@ agent-pty kill demo
 
 ## MCP server (for Claude Code and other agents)
 
-The package ships an MCP server (`agent-pty-mcp`) that exposes the API as native tool calls over stdio JSON-RPC. Tools registered: `pty_spawn`, `pty_send`, `pty_snapshot`, `pty_wait_for`, `pty_list`, `pty_kill`.
+The package ships an MCP server (`agent-pty-mcp`) that exposes the API as native tool calls over stdio JSON-RPC. Tools registered: `pty_spawn`, `pty_send`, `pty_snapshot`, `pty_wait_for`, `pty_list`, `pty_kill`, the `mesh_*` orchestration tools, and the read-only `spock_*` fleet-analysis tools (`spock_assess`, `spock_diagnose`, `spock_recommend`).
 
 Register with the Claude Code CLI:
 
@@ -67,6 +67,23 @@ Restart Claude Code; the agent will see the tools natively. Validate the server 
 ## Roadmap
 
 The core (M1–M5) is shipped and frozen. **M6 — mesh** adds an opt-in orchestration layer for the [Captain Kirk pattern](docs/captain-kirk-pattern.md): one agent driving N agents in other panes, with done-detection, push-event subscriptions, blocked-on-prompt detection, incremental snapshots, cross-pane piping, and lifecycle notifications. Lives in `agent_pty/mesh.py` with parallel `mesh_*` MCP tools; core API unchanged. See [docs/build-plan.md](docs/build-plan.md#m6--mesh-orchestration-across-sessions) for the full milestone with acceptance tests.
+
+**M7 — Spock** adds the read-only science officer to Kirk's commander: instead of re-reading N raw screens every turn, the captain makes one cheap call that observes the whole fleet and returns a structured assessment — per-pane state (`dead`/`blocked`/`idle`/`busy`), a fleet-wide deadlock flag, and prioritized advisories. Spock never sends keystrokes; it composes on mesh's blocked-detection and the core's `snapshot`. Lives in `agent_pty/spock.py` with parallel `spock_*` MCP tools. See the [Spock pattern](docs/spock-pattern.md) and [docs/build-plan.md](docs/build-plan.md#m7--spock-fleet-analysis--advisory).
+
+**M8–M17 — the rest of the bridge crew.** Ten more opt-in layers, each its own module + parallel `*_` MCP tools, all composing on mesh/Spock and the frozen core without changing a signature. Read-only modules (Captain's Log, Bones, and Red Alert which is read-only *on panes*) observe and never type; the others are actuators. Each links its full milestone in [docs/build-plan.md](docs/build-plan.md).
+
+| Tier | Crew (milestone) | One line | Type |
+|---|---|---|---|
+| 1 | **[Uhura](docs/uhura-pattern.md)** (M8) | Framed request/response + fleet `broadcast` on top of mesh's done-detection, optional typed (JSON) replies. | actuator |
+| 1 | **[Scotty](docs/scotty-pattern.md)** (M9) | Crash-recovery from a respawn registry + a budgeted background Supervisor + an `over_budget` throttle. | actuator |
+| 1 | **[Prime Directive](docs/prime_directive-pattern.md)** (M10) | Policy actuator for blocked panes — auto-approve/deny/escalate; secrets *always* escalate (hard-coded). | actuator |
+| 2 | **[Sulu](docs/sulu-pattern.md)** (M11) | Helm dispatcher: route a backlog of jobs onto idle panes, queue overflow, return `command -> reply`. | actuator |
+| 2 | **[Captain's Log](docs/captains_log-pattern.md)** (M12) | Flight recorder: poll watched panes, append each *changed* screen to a (replayable `jsonl`) transcript. | **read-only** |
+| 2 | **[Red Alert](docs/red_alert-pattern.md)** (M13) | Escalation siren: watch Spock's deadlock/death signals and push a notification to the human. | read-only on panes |
+| 3 | **[Holodeck](docs/holodeck-pattern.md)** (M14) | Sandboxed `git worktree` + pane per simulation — the safe substrate for a write-concurrent swarm. | actuator (runs `git`) |
+| 3 | **[Bones](docs/bones-pattern.md)** (M15) | Health pathology: diagnose `errors`/`thrashing`/`hung` in a still-running pane Spock only calls "busy". | **read-only** |
+| 3 | **[Transporter](docs/transporter-pattern.md)** (M16) | Context checkpoint: save a pane's visible screen + spawn spec to JSON, restore into a fresh pane. | actuator |
+| 3 | **[Worf](docs/worf-pattern.md)** (M17) | Clean-room adversarial review in one call: spawn an independent reviewer pane, return its verdict. | actuator |
 
 ## Problem
 
