@@ -82,3 +82,14 @@ Implementation choices worth knowing about:
 - Blocked-on-prompt detection is regex-based over the bottom rows of the rendered screen. Best-effort signal, not a guarantee.
 - `pipe` is fire-and-forget keystroke injection. Newlines on the source become Enter presses on the destination — sanitize content if you don't want random execution.
 - All user-supplied text in mesh APIs round-trips literal `<` correctly. The named-key parser (`<C-c>`, `<Enter>`, etc.) is bypassed inside mesh — use `Pty.send` directly for keystrokes.
+
+## 2026-09-18 revision — what Claude Code ≥ 2.1 changed
+
+Live-tested against Claude Code 2.1.273. Three CLI behaviours broke the original sentinel mechanics and are now handled in `mesh`:
+
+- **The TUI echoes the submitted prompt**, marker included, and a shell echoes the framed command. `send_with_done` now anchors done-detection on that echo (whitespace-insensitive, so wrapped lines match) and only accepts a marker that appears after it; `frame_shell` assembles the marker from two quoted halves so a shell echo never contains it.
+- **A typed newline is a line break, not submit.** `send_with_done` strips trailing newlines and sends an explicit Enter.
+- **`claude --print` exits immediately without a prompt.** Drive interactive `claude` panes for conversations (spawn with `env -u CLAUDECODE claude --model …` from inside another Claude session), and use per-call `claude -p "<prompt>" --output-format json` (or `--json-schema`) through `sulu_dispatch` / `worf_review` for one-shot structured work. That is also the path that needs no sentinel at all.
+- **Claude's permission dialog** ("Do you want to proceed? ❯ 1. Yes …") is now recognised by `detect_blocked` (hints prefixed `claude`), so Spock's deadlock flag fires and PrimeDirective answers with `1` / Esc instead of `y` / `n`.
+
+Native Claude Code now covers most Claude-to-Claude orchestration (background subagents, worktree isolation, Workflow pipelines, peer messaging). Mesh earns its place for **non-Claude CLIs**, **interactive programs**, and **human-attachable** sessions.

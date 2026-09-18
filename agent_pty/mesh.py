@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import queue
 import re
+import shlex
 import threading
 import time
 import weakref
@@ -26,7 +27,6 @@ from agent_pty.session import (
     _has,
     list_sessions,
 )
-from agent_pty.wait import wait_for
 
 DEFAULT_DONE_MARKER = "<<END>>"
 SUBSCRIBE_POLL_INTERVAL = 0.025
@@ -37,40 +37,123 @@ IDLE_THRESHOLD = 2.0
 # ---------- Sync primitives ----------
 
 
+def split_marker(marker: str) -> tuple[str, str]:
+    """Split `marker` into two halves so that neither half contains it.
+
+    Used to build shell lines that PRINT the marker without CONTAINING it
+    (`printf '%s\\n' '<<EN''D>>'`), so the echoed command line can never be
+    mistaken for the real done-marker.
+    """
+    half = max(1, len(marker) // 2)
+    return marker[:half], marker[half:]
+
+
+def frame_shell(command: str, done_marker: str) -> str:
+    """Frame a shell command so the done-marker is printed AFTER it finishes.
+
+    The marker is assembled from two quoted halves so the literal marker never
+    appears in the echoed command line — only in the output, on its own line.
+    """
+    head, tail = split_marker(done_marker)
+    return f"{command}; printf '%s\\n' {shlex.quote(head)}{shlex.quote(tail)}"
+
+
 def send_with_done(
     name: str,
     text: str,
     done_marker: str = DEFAULT_DONE_MARKER,
     timeout: float = 60.0,
+    submit: bool = True,
 ) -> str:
-    """Send `text`, wait for `done_marker`, return reply text bounded by them.
+    """Send `text`, submit it, wait for `done_marker`, return the reply.
 
     Captain-Kirk convention: prompt the sub-agent to terminate its reply
     with the marker (e.g. "Answer X. End your reply with <<END>>"). The
-    returned string is the screen content that appeared after the sent
-    prompt's last non-empty line and before the marker, with the marker
-    itself excluded. Trailing/leading whitespace is trimmed.
+    returned string is the screen content that appeared AFTER the echo of
+    the sent text and before the marker, marker excluded, whitespace trimmed.
 
-    `text` is treated as literal: any `<` characters are sent as-is, not
-    interpreted as named-key tokens. (Use `Pty.send` directly if you need
-    keystroke parsing.)
+    `text` is sent literally (any `<` is escaped, never parsed as a named
+    key). Trailing newlines are stripped and, when `submit` is true, an
+    explicit Enter keystroke follows — the Claude Code TUI treats a typed
+    newline as a line break, not as "submit", so a bare "\\n" never
+    submits there; Enter works for shells and TUIs alike.
+
+    Done-detection is anchored on the ECHO of the sent text: a marker only
+    counts once it appears after that echo (the echoed prompt usually
+    contains the marker itself, and previous replies may still be on
+    screen). If the echo has scrolled off or been cleared, everything on
+    screen is after it and the last marker wins. Best-effort, as with any
+    screen scraping; prefer structured output where the target offers it.
     """
-    send(name, text.replace("<", "<<"))
-    snap = wait_for(name, done_marker, timeout=timeout)
-    return _extract_reply(snap, text, done_marker)
+    body = text.rstrip("\n")
+    before = snapshot(name)
+    base_marker_lines = _marker_line_count(before, done_marker)
+    send(name, body.replace("<", "<<"))
+    if submit:
+        send(name, "<Enter>")
+    deadline = time.monotonic() + timeout
+    seen_anchor = False
+    while True:
+        snap = snapshot(name)
+        anchor_end = _find_echo_end(snap, body)
+        marker_idx = snap.rfind(done_marker)
+        if anchor_end is not None:
+            seen_anchor = True
+            if marker_idx != -1 and marker_idx >= anchor_end:
+                return snap[anchor_end:marker_idx].strip("\n").strip()
+        elif marker_idx != -1 and (
+            seen_anchor or _marker_line_count(snap, done_marker) > base_marker_lines
+        ):
+            # The echo scrolled off (or the target cleared the screen): every
+            # line still visible came after the prompt, so the last marker
+            # is the reply's.
+            return snap[:marker_idx].strip("\n").strip()
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"Pattern {done_marker!r} not found after the sent text in "
+                f"session {name!r} within {timeout}s"
+            )
+        time.sleep(0.05)
+
+
+_ANCHOR_CHARS = 24
+
+
+def _find_echo_end(snap: str, sent_text: str) -> int | None:
+    """Locate the end of the sent text's echo in `snap`, ignoring whitespace.
+
+    Terminals wrap long lines and TUIs indent continuations, so the echo
+    rarely matches the sent text byte-for-byte. Compare with all whitespace
+    removed: find the LAST occurrence of the sent text's final
+    `_ANCHOR_CHARS` non-whitespace characters and map that back to an index
+    into `snap`. Returns None when the echo is not on screen.
+    """
+    anchor = "".join(sent_text.split())[-_ANCHOR_CHARS:]
+    if not anchor:
+        return 0
+    chars: list[str] = []
+    positions: list[int] = []
+    for i, ch in enumerate(snap):
+        if not ch.isspace():
+            chars.append(ch)
+            positions.append(i)
+    idx = "".join(chars).rfind(anchor)
+    if idx == -1:
+        return None
+    return positions[idx + len(anchor) - 1] + 1
+
+
+def _marker_line_count(snap: str, marker: str) -> int:
+    return sum(1 for line in snap.split("\n") if marker in line)
 
 
 def _extract_reply(snap: str, sent_text: str, done_marker: str) -> str:
+    """Legacy extractor kept for callers that already hold a snapshot."""
     marker_idx = snap.rfind(done_marker)
     if marker_idx == -1:
         return ""
-    sent_lines = [line for line in sent_text.split("\n") if line.strip()]
-    anchor = sent_lines[-1] if sent_lines else ""
-    if anchor:
-        anchor_idx = snap.rfind(anchor, 0, marker_idx)
-        start = anchor_idx + len(anchor) if anchor_idx != -1 else 0
-    else:
-        start = 0
+    anchor_end = _find_echo_end(snap, sent_text.rstrip("\n"))
+    start = anchor_end if anchor_end is not None and anchor_end <= marker_idx else 0
     return snap[start:marker_idx].strip("\n").strip()
 
 
@@ -87,7 +170,9 @@ def snapshot_since(name: str, marker: str) -> str:
     return snap[idx + len(marker):].lstrip("\n")
 
 
-# Heuristic patterns for blocked-on-prompt detection.
+# Heuristic patterns for blocked-on-prompt detection. Generic prompts are
+# matched against the LAST non-empty line (end-anchored); Claude Code dialogs
+# span several lines, so they are matched anywhere in the bottom window.
 _BLOCKED_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(?i)password[^:\n]*:\s*$"), "password prompt"),
     (
@@ -97,22 +182,43 @@ _BLOCKED_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(?i)\bcontinue\?\s*$"), "continue prompt"),
     (re.compile(r"(?i)(allow|approve)\b[^\n]{0,80}\?\s*$"), "approval prompt"),
     (re.compile(r"(?i)press\s+any\s+key"), "any-key prompt"),
+    (re.compile(r"(?i)press\s+enter\s+to\s+continue"), "enter-to-continue prompt"),
     (re.compile(r"(?i)(2fa|verification)\s+code\s*:?\s*$"), "2FA code prompt"),
 ]
+
+# Claude Code (>= 2.1) interactive dialogs. Hints start with "claude" so
+# PrimeDirective can pick number-key answers instead of y/n.
+_CLAUDE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"Do you want to proceed\?"), "claude permission prompt"),
+    (re.compile(r"Do you trust the files in this folder\?"), "claude trust prompt"),
+    (re.compile(r"Yes, I trust this folder"), "claude trust prompt"),
+    (re.compile(r"Only proceed if you trust this configuration"), "claude trust prompt"),
+    (re.compile(r"Would you like to proceed\?"), "claude plan approval prompt"),
+    (re.compile(r"(?m)^\s*❯\s+1\.\s"), "claude numbered choice"),
+    (re.compile(r"Esc to cancel"), "claude dialog"),
+    (re.compile(r"Enter to confirm"), "claude dialog"),
+]
+
+_BLOCKED_TAIL_LINES = 12
 
 
 def detect_blocked(name: str) -> Optional[str]:
     """Return a hint string if the session looks blocked on input, else None.
 
     Heuristic: regex over the bottom non-empty lines of the rendered screen
-    against common interactive prompts. Best-effort. False positives are
-    possible (e.g. a `read -p "Continue?"` script). False negatives are
-    possible (custom prompts). Use as a signal, not a guarantee.
+    against common interactive prompts and Claude Code's permission / trust /
+    plan dialogs. Best-effort. False positives are possible (e.g. a
+    `read -p "Continue?"` script). False negatives are possible (custom
+    prompts). Use as a signal, not a guarantee.
     """
     snap = snapshot(name)
     lines = [line for line in snap.split("\n") if line.strip()]
     if not lines:
         return None
+    window = "\n".join(lines[-_BLOCKED_TAIL_LINES:])
+    for pattern, hint in _CLAUDE_PATTERNS:
+        if pattern.search(window):
+            return hint
     tail = "\n".join(lines[-3:])
     for pattern, hint in _BLOCKED_PATTERNS:
         if pattern.search(tail):
@@ -376,6 +482,8 @@ class Mesh:
     """Public namespace for the mesh API, parallel to Pty."""
 
     send_with_done = staticmethod(send_with_done)
+    frame_shell = staticmethod(frame_shell)
+    split_marker = staticmethod(split_marker)
     snapshot_since = staticmethod(snapshot_since)
     detect_blocked = staticmethod(detect_blocked)
     pipe = staticmethod(pipe)

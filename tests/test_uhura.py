@@ -14,12 +14,13 @@ contract a real sub-agent would honor. A test needing a real `claude` CLI is
 marked @pytest.mark.manual (see test_mesh.py example 12).
 """
 
+import os
 import shutil
 import time
 
 import pytest
 
-from agent_pty import Pty
+from agent_pty import Pty, mesh
 from agent_pty.io import send
 from agent_pty.uhura import Uhura, ask, broadcast
 from tests.conftest import TEST_SHELL
@@ -181,6 +182,27 @@ def test_broadcast_returns_one_key_per_name():
 
 # ---------- 5. Captain-Kirk integration (manual, opt-in) ----------
 
+def _spawn_claude(name: str) -> None:
+    """Spawn an interactive `claude` pane and get it to its input box.
+
+    A nested launch (from inside another Claude session) starts with the
+    folder-trust dialog even in HOME; the test accepts it deliberately —
+    PrimeDirective never will. Then wait for the idle input box.
+    """
+    Pty.spawn(
+        name,
+        cmd="env -u CLAUDECODE claude --model haiku",
+        cwd=os.path.expanduser("~"),
+        cols=120,
+        rows=40,
+    )
+    Pty.wait_for(name, "❯", timeout=30.0)
+    time.sleep(1.0)
+    if mesh.detect_blocked(name) == "claude trust prompt":
+        Pty.send(name, "<Down><Enter>")
+    Pty.wait_for(name, "? for shortcuts", timeout=30.0)
+
+
 
 @pytest.mark.manual
 @pytest.mark.skipif(
@@ -193,12 +215,11 @@ def test_uhura_asks_real_claude():
     Marked @pytest.mark.manual; not in default CI. Requires the claude CLI on
     PATH with valid auth.
     """
-    Pty.spawn("uh-kirk", cmd="claude --print --output-format text", cols=120, rows=40)
-    time.sleep(2)
+    _spawn_claude("uh-kirk")
     reply = ask(
         "uh-kirk",
         "Reply with the single word 'ack'.",
         done_marker="<<END>>",
-        timeout=30.0,
+        timeout=60.0,
     )
     assert reply.strip(), "Uhura got an empty reply from claude"

@@ -28,7 +28,7 @@ The honest framing: when you just want one verdict and never a follow-up, a one-
 ## The honest costs
 
 - **Verdict quality is the reviewer's, not Worf's.** The mechanics are deterministic; the judgement is exactly as good as the model behind `reviewer_cmd`. With a shell reviewer you get a shell's "verdict" — Worf guarantees the round-trip, never the wisdom.
-- **Inherits `send_with_done`'s marker contract.** The reviewer must end its reply with `done_marker`. A reviewer that never prints the marker yields an empty verdict after `timeout`, same failure mode (and same screen-scraping caveats) as [mesh](captain-kirk-pattern.md#the-honest-costs).
+- **The reviewer is a command, not a conversation.** Since 2026-09 the reviewer pane is a shell that runs `reviewer_cmd` once per review with the prompt on stdin (Claude Code ≥ 2.1 `--print` exits unless given a prompt, so the old "type into a print-mode pane" pattern is gone). Follow-ups re-run the command with new content; the pane persists, the model's memory does not. A command that never exits raises `TimeoutError` after `timeout`.
 - **The capture is a point-in-time screen.** Worf reviews what's *visible* (full screen, or the last `lines` non-empty lines) — not scrollback, not files. If the artifact scrolled off, it isn't reviewed. Capture the right pane at the right moment.
 - **It costs a pane.** Each review spawns a real reviewer process. Reuse the pane for follow-ups, then `dismiss` it; don't spawn-and-leak one per call.
 
@@ -47,15 +47,16 @@ Worf.review(
     target_name: str,
     instruction: str,
     reviewer_name: str = "worf-reviewer",
-    reviewer_cmd: str | None = None,   # None -> a plain shell; real use: "claude --print --output-format text"
+    reviewer_cmd: str | None = None,   # None -> "claude -p --output-format text"; any stdin->stdout CLI works
     done_marker: str = "<<END>>",
     timeout: float = 60.0,
     lines: int | None = None,          # None -> full screen; N -> last N non-empty lines of the target
+    reviewer_shell: str = "bash --norc --noprofile",
 ) -> str
-    # 1. spawn an independent reviewer pane (no shared context with the target)
-    # 2. capture the target's content (full screen, or its last `lines` non-empty lines)
-    # 3. ask the reviewer via mesh.send_with_done, bounding the reply with done_marker
-    # 4. return the verdict string. The reviewer pane is LEFT RUNNING.
+    # 1. ensure an independent reviewer SHELL pane exists (spawned once, reused for follow-ups)
+    # 2. capture the target's content and write the review prompt to a temp file
+    # 3. run `reviewer_cmd < promptfile`, framed by mesh.frame_shell so the marker prints after exit
+    # 4. return the command's output as the verdict. The reviewer pane is LEFT RUNNING.
 
 Worf.dismiss(reviewer_name: str) -> None
     # kill the reviewer pane (convenience over session.kill).
@@ -65,4 +66,4 @@ The verdict is exactly the text the reviewer emitted between the sent prompt and
 
 ## Status
 
-Pattern documented and **implemented** 2026-06-13 as M17. Composes on M6 (mesh) and the frozen core (M1–M5); changes no existing signature.
+Pattern documented and **implemented** 2026-06-13 as M17; reviewer mechanics revised 2026-09-18 for Claude Code ≥ 2.1 (stdin prompt file + `frame_shell`, pane reuse). Composes on M6 (mesh) and the frozen core (M1–M5); changes no existing signature.

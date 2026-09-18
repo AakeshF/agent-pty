@@ -18,10 +18,11 @@ def _get_pane(name: str) -> libtmux.Pane:
         raise SessionNotFoundError(f"Session {name!r} not found")
     try:
         session = server.sessions.get(session_name=full)
+        return session.active_window.active_pane
     except Exception:
-        # TOCTOU: session disappeared between the _has check and .get()
+        # TOCTOU: the session (or the whole tmux server, when this was its
+        # last session) disappeared between the _has check and the lookup.
         raise SessionNotFoundError(f"Session {name!r} not found")
-    return session.active_window.active_pane
 
 
 def send(name: str, text: str) -> None:

@@ -30,11 +30,11 @@ def _spawn_target(name: str, token: str) -> None:
     time.sleep(0.2)
 
 
-# A stub "review instruction" that is actually a bash command: when the
-# reviewer pane (a shell) runs it, it prints a canned verdict ending in the
-# marker. send_with_done waits for the marker, so the trailing wrapper lines
-# from _build_prompt don't matter — the verdict has already landed.
-_STUB_INSTRUCTION = "printf 'VERDICT: ok\\n<<END>>\\n' #"
+# Stub reviewer: `cat` echoes the review prompt back as the "verdict", so the
+# round-trip proves both the framing (marker only after the command exits)
+# and the content capture (the target's token must be inside the verdict).
+_STUB_REVIEWER = "cat"
+_STUB_INSTRUCTION = "VERDICT: ok"
 
 
 # ---------- 1. mechanics: returns the canned verdict ----------
@@ -46,11 +46,13 @@ def test_review_returns_stub_verdict():
         "worf-target",
         _STUB_INSTRUCTION,
         reviewer_name="worf-rev",
-        reviewer_cmd=TEST_SHELL,
+        reviewer_cmd=_STUB_REVIEWER,
         done_marker="<<END>>",
         timeout=5.0,
     )
     assert "VERDICT: ok" in verdict
+    assert "REVIEW-ME-A1" in verdict, "captured target content must reach the reviewer"
+    assert "<<END>>" not in verdict
 
 
 # ---------- 2. mechanics: reviewer pane is spawned and left running ----------
@@ -63,7 +65,7 @@ def test_review_spawns_independent_reviewer_pane():
         "worf-t2",
         _STUB_INSTRUCTION,
         reviewer_name="worf-rev2",
-        reviewer_cmd=TEST_SHELL,
+        reviewer_cmd=_STUB_REVIEWER,
         done_marker="<<END>>",
         timeout=5.0,
     )
@@ -81,7 +83,7 @@ def test_dismiss_kills_reviewer_pane():
         "worf-t3",
         _STUB_INSTRUCTION,
         reviewer_name="worf-rev3",
-        reviewer_cmd=TEST_SHELL,
+        reviewer_cmd=_STUB_REVIEWER,
         done_marker="<<END>>",
         timeout=5.0,
     )
@@ -106,28 +108,46 @@ def test_review_with_lines_limit_still_returns_verdict():
         "worf-t4",
         _STUB_INSTRUCTION,
         reviewer_name="worf-rev4",
-        reviewer_cmd=TEST_SHELL,
+        reviewer_cmd=_STUB_REVIEWER,
         done_marker="<<END>>",
         timeout=5.0,
         lines=2,
     )
     assert "VERDICT: ok" in verdict
+    assert "REVIEW-ME-D4" in verdict
 
 
-# ---------- 5. default reviewer_cmd is a shell ----------
+# ---------- 5. default reviewer_cmd targets claude print mode; pane is reused ----------
 
 
-def test_review_default_reviewer_cmd_spawns_shell():
+def test_default_reviewer_cmd_is_claude_print_mode():
+    from agent_pty.worf import DEFAULT_REVIEWER_CMD
+
+    assert DEFAULT_REVIEWER_CMD.startswith("claude -p")
+
+
+def test_review_reuses_existing_reviewer_pane():
     _spawn_target("worf-t5", "REVIEW-ME-E5")
-    verdict = Worf.review(
+    first = Worf.review(
         "worf-t5",
         _STUB_INSTRUCTION,
         reviewer_name="worf-rev5",
+        reviewer_cmd=_STUB_REVIEWER,
         done_marker="<<END>>",
         timeout=5.0,
     )
-    assert "VERDICT: ok" in verdict
-    assert "worf-rev5" in list_sessions()
+    second = Worf.review(
+        "worf-t5",
+        "VERDICT: second",
+        reviewer_name="worf-rev5",
+        reviewer_cmd=_STUB_REVIEWER,
+        done_marker="<<END>>",
+        timeout=5.0,
+    )
+    assert "REVIEW-ME-E5" in first
+    assert "VERDICT: second" in second
+    assert "VERDICT: ok" not in second, "second verdict must not include the first"
+    assert list_sessions().count("worf-rev5") == 1
 
 
 # ---------- 6. real-claude integration (manual, opt-in) ----------
@@ -150,8 +170,8 @@ def test_worf_reviews_with_real_claude():
         "worf-mt",
         "You are an adversarial code reviewer. Critique the code below for bugs.",
         reviewer_name="worf-real",
-        reviewer_cmd="claude --print --output-format text",
+        reviewer_cmd="env -u CLAUDECODE claude -p --model haiku --output-format text",
         done_marker="<<END>>",
-        timeout=60.0,
+        timeout=90.0,
     )
     assert verdict.strip(), "reviewer returned an empty verdict"

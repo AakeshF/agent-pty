@@ -14,13 +14,12 @@ at a time. Sulu is an ACTUATOR — it sends keystrokes into panes.
 Best-effort, and it inherits every heuristic limit of its dependencies:
 idle-detection is Spock's double-sample (a pane quiet *during the settle
 window* reads as idle even mid-task), and reply-extraction is mesh's
-done-marker scraping. Use for fast, deterministic, self-terminating work; a
+done-marker scraping anchored on the command echo. Use for fast, deterministic, self-terminating work; a
 command that never finds a free pane within `timeout` maps to "".
 """
 
 from __future__ import annotations
 
-import shlex
 import time
 
 from agent_pty import mesh
@@ -44,11 +43,12 @@ def _idle_panes(names: list[str] | None) -> list[str]:
 def _frame(command: str, done_marker: str) -> str:
     """Frame a shell command so its output is followed by the done marker.
 
-    The marker is printed on its own line *after* the command runs, so
-    mesh.send_with_done sees it only once the command has finished. shlex
-    quoting keeps an arbitrary marker safe inside the shell line.
+    Delegates to mesh.frame_shell: the marker is printed on its own line
+    AFTER the command runs, assembled from two quoted halves so the echoed
+    command line never contains the literal marker (which would otherwise
+    satisfy done-detection before the command has even started).
     """
-    return f"{command}; printf '%s\\n' {shlex.quote(done_marker)}\n"
+    return mesh.frame_shell(command, done_marker)
 
 
 def dispatch(

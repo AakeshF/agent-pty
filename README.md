@@ -64,6 +64,14 @@ claude mcp list   # should show agent-pty as healthy
 
 Restart Claude Code; the agent will see the tools natively. Validate the server itself with the smoke script: `python examples/mcp_smoke.py` — exercises the full stdio roundtrip independent of any MCP client.
 
+## Driving Claude Code panes (≥ 2.1)
+
+- Spawn an interactive session with `pty_spawn(name, cmd="env -u CLAUDECODE claude --model sonnet")` when calling from inside another Claude session (the nested-session guard is env-based). Such a launch opens with the folder-trust dialog; `mesh_detect_blocked` reports it as `claude trust prompt`, PrimeDirective always escalates it, and a human answers with `pty_send(name, "<Down><Enter>")` — or `<Esc>` to bail.
+- Submit prompts with `mesh_send_with_done` (it sends Enter for you) or `pty_send(name, "text<Enter>")` — a bare `\n` is a line break in the TUI, not submit.
+- `claude --print` exits unless it is given a prompt: for one-shot work run `claude -p "<prompt>" --output-format json` as a shell command via `sulu_dispatch`, or let `worf_review` do it with the prompt on stdin.
+- A worker stuck on "Do you want to proceed?" shows up as `blocked` in `spock_assess`; `prime_directive_enforce(name, policy="permissive")` answers it with `1`.
+- For a quiet first screen spawn workers with `cmd="bash --norc --noprofile"` (a fish login shell prints its fetch banner into the pane).
+
 ## Roadmap
 
 The core (M1–M5) is shipped and frozen. **M6 — mesh** adds an opt-in orchestration layer for the [Captain Kirk pattern](docs/captain-kirk-pattern.md): one agent driving N agents in other panes, with done-detection, push-event subscriptions, blocked-on-prompt detection, incremental snapshots, cross-pane piping, and lifecycle notifications. Lives in `agent_pty/mesh.py` with parallel `mesh_*` MCP tools; core API unchanged. See [docs/build-plan.md](docs/build-plan.md#m6--mesh-orchestration-across-sessions) for the full milestone with acceptance tests.

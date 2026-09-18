@@ -4,6 +4,7 @@ Each test corresponds to one numbered acceptance criterion in
 docs/build-plan.md M6 section. Tests run against a real tmux server.
 """
 
+import os
 import re
 import shutil
 import subprocess
@@ -43,6 +44,50 @@ def test_send_with_done_does_not_leak_subsequent_output():
     Pty.wait_for("d2", "unrelated-after", timeout=3.0)
     assert "unrelated-after" not in reply
     assert reply == "first"
+
+
+def test_send_with_done_ignores_marker_in_command_echo():
+    # The sent line CONTAINS the marker; the output arrives only after a delay.
+    # Done-detection must wait for the marker that appears after the echo.
+    Pty.spawn("d3", cmd=TEST_SHELL)
+    Pty.wait_for("d3", "$", timeout=3.0)
+    t0 = time.monotonic()
+    reply = Mesh.send_with_done(
+        "d3",
+        "sleep 0.6; printf 'late reply\\n<<END>>\\n'",
+        done_marker="<<END>>",
+        timeout=5.0,
+    )
+    assert time.monotonic() - t0 >= 0.5, "returned before the command produced output"
+    assert reply == "late reply"
+
+
+def test_send_with_done_ignores_marker_from_previous_reply():
+    Pty.spawn("d4", cmd=TEST_SHELL)
+    Pty.wait_for("d4", "$", timeout=3.0)
+    first = Mesh.send_with_done("d4", "printf 'one\\n<<END>>\\n'", timeout=3.0)
+    second = Mesh.send_with_done(
+        "d4", "sleep 0.4; printf 'two\\n<<END>>\\n'", timeout=3.0
+    )
+    assert first == "one"
+    assert second == "two"
+
+
+def test_send_with_done_submits_with_enter_not_newline():
+    # No trailing newline in the text: send_with_done must still submit.
+    Pty.spawn("d5", cmd=TEST_SHELL)
+    Pty.wait_for("d5", "$", timeout=3.0)
+    reply = Mesh.send_with_done("d5", "printf 'no-newline\\n<<END>>\\n'", timeout=3.0)
+    assert reply == "no-newline"
+
+
+def test_frame_shell_hides_marker_from_echo():
+    framed = Mesh.frame_shell("echo hi", "<<END>>")
+    assert "<<END>>" not in framed
+    assert framed.startswith("echo hi; printf")
+    Pty.spawn("d6", cmd=TEST_SHELL)
+    Pty.wait_for("d6", "$", timeout=3.0)
+    assert Mesh.send_with_done("d6", framed, timeout=3.0) == "hi"
 
 
 # ---------- 2. Subscription latency ----------
@@ -114,6 +159,50 @@ def test_detect_blocked_y_n_prompt():
         time.sleep(0.05)
     assert hint is not None
     assert "y/n" in hint.lower() or "continue" in hint.lower()
+
+
+# ---------- 5b. Blocked detection: Claude Code permission dialog ----------
+
+CLAUDE_PERMISSION_DIALOG = (
+    " Bash command\\n\\n   touch /tmp/x\\n   Create probe file\\n\\n"
+    " Do you want to proceed?\\n ❯ 1. Yes\\n"
+    "   2. Yes, and always allow access to /tmp from this project\\n"
+    "   3. No\\n\\n Esc to cancel · Tab to amend\\n"
+)
+
+
+CLAUDE_TRUST_DIALOG = (
+    " Only proceed if you trust this configuration.\\n\\n ❯ No, exit\\n"
+    "   Yes, I trust this folder\\n\\n Enter to confirm · Esc to cancel\\n"
+)
+
+
+def test_detect_blocked_claude_trust_prompt():
+    Pty.spawn("b2t", cmd=TEST_SHELL, cols=120)
+    Pty.wait_for("b2t", "$", timeout=3.0)
+    Pty.send("b2t", f"printf '{CLAUDE_TRUST_DIALOG}'; read -n1 x\n")
+    deadline = time.monotonic() + 1.5
+    hint = None
+    while time.monotonic() < deadline:
+        hint = Mesh.detect_blocked("b2t")
+        if hint:
+            break
+        time.sleep(0.05)
+    assert hint == "claude trust prompt"
+
+
+def test_detect_blocked_claude_permission_prompt():
+    Pty.spawn("b2c", cmd=TEST_SHELL, cols=120)
+    Pty.wait_for("b2c", "$", timeout=3.0)
+    Pty.send("b2c", f"printf '{CLAUDE_PERMISSION_DIALOG}'; read -n1 x\n")
+    deadline = time.monotonic() + 1.5
+    hint = None
+    while time.monotonic() < deadline:
+        hint = Mesh.detect_blocked("b2c")
+        if hint:
+            break
+        time.sleep(0.05)
+    assert hint == "claude permission prompt"
 
 
 # ---------- 6. Blocked detection: false-positive guard ----------
@@ -267,6 +356,27 @@ def test_mcp_each_mesh_tool_has_description():
 
 # ---------- 12. Captain-Kirk integration (manual, opt-in) ----------
 
+def _spawn_claude(name: str) -> None:
+    """Spawn an interactive `claude` pane and get it to its input box.
+
+    A nested launch (from inside another Claude session) starts with the
+    folder-trust dialog even in HOME; the test accepts it deliberately —
+    PrimeDirective never will. Then wait for the idle input box.
+    """
+    Pty.spawn(
+        name,
+        cmd="env -u CLAUDECODE claude --model haiku",
+        cwd=os.path.expanduser("~"),
+        cols=120,
+        rows=40,
+    )
+    Pty.wait_for(name, "❯", timeout=30.0)
+    time.sleep(1.0)
+    if Mesh.detect_blocked(name) == "claude trust prompt":
+        Pty.send(name, "<Down><Enter>")
+    Pty.wait_for(name, "? for shortcuts", timeout=30.0)
+
+
 
 @pytest.mark.manual
 @pytest.mark.skipif(
@@ -280,18 +390,11 @@ def test_captain_kirk_drives_real_claude():
       - claude CLI on PATH
       - valid auth (ANTHROPIC_API_KEY or `claude login` already done)
     """
-    Pty.spawn(
-        "kirk",
-        cmd="claude --print --output-format text",
-        cols=120,
-        rows=40,
-    )
-    # Spin up may take a few seconds
-    time.sleep(2)
+    _spawn_claude("kirk")
     reply = Mesh.send_with_done(
         "kirk",
-        "Reply with the literal text 'ack' followed by <<END>> on a new line.\n",
+        "Reply with the literal text 'ack' followed by <<END>> on a new line.",
         done_marker="<<END>>",
-        timeout=30.0,
+        timeout=60.0,
     )
     assert reply.strip(), "captain got an empty reply"

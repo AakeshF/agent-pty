@@ -30,6 +30,20 @@ def _spawn_secret_prompt(name: str) -> None:
     _wait_blocked(name)
 
 
+CLAUDE_DIALOG = (
+    " Bash command\\n\\n   touch /tmp/x\\n\\n Do you want to proceed?\\n ❯ 1. Yes\\n"
+    "   2. Yes, and always allow\\n   3. No\\n\\n Esc to cancel · Tab to amend\\n"
+)
+
+
+def _spawn_claude_dialog(name: str) -> None:
+    """Spawn a pane that renders a Claude Code permission dialog and waits for ONE key."""
+    Pty.spawn(name, cmd=TEST_SHELL, cols=120)
+    Pty.wait_for(name, "$", timeout=3.0)
+    Pty.send(name, f"printf '{CLAUDE_DIALOG}'; read -n1 x; echo; echo GOT=$x\n")
+    _wait_blocked(name)
+
+
 def _wait_blocked(name: str, deadline_s: float = 2.0) -> str:
     """Poll PrimeDirective.resolve() under permissive policy until it is not
     'none' (i.e. detect_blocked sees the prompt). Returns the decision."""
@@ -164,3 +178,44 @@ def test_namespace_exposes_policy():
     assert PrimeDirective.Policy is Policy
     cons = PrimeDirective.Policy.conservative()
     assert cons.default == "escalate" and cons.rules == {}
+
+
+# ---------- 6. Claude Code permission dialog: number keys ----------
+
+
+def test_claude_dialog_conservative_escalates():
+    _spawn_claude_dialog("pd-claude")
+    assert PrimeDirective.resolve("pd-claude", Policy.conservative()) == "escalate"
+
+
+def test_claude_dialog_permissive_answers_with_1():
+    _spawn_claude_dialog("pd-claude2")
+    decision = PrimeDirective.enforce("pd-claude2", Policy.permissive())
+    assert decision == "approve"
+    Pty.wait_for("pd-claude2", "GOT=", timeout=3.0)
+    assert "GOT=1" in Pty.snapshot("pd-claude2")
+
+
+def test_keys_for_selects_by_hint_family():
+    assert PrimeDirective.keys_for("claude permission prompt") == ("1", "<Esc>")
+    assert PrimeDirective.keys_for("y/n confirmation") == ("y<Enter>", "n<Enter>")
+    assert PrimeDirective.keys_for(None) == ("y<Enter>", "n<Enter>")
+
+
+CLAUDE_TRUST_DIALOG = (
+    " This folder pre-approves 3 tool permissions in .claude/settings.local.json\\n"
+    " Only proceed if you trust this configuration.\\n\\n ❯ No, exit\\n"
+    "   Yes, I trust this folder\\n\\n Enter to confirm · Esc to cancel\\n"
+)
+
+
+def test_claude_trust_dialog_always_escalates():
+    Pty.spawn("pd-trust", cmd=TEST_SHELL, cols=120)
+    Pty.wait_for("pd-trust", "$", timeout=3.0)
+    Pty.send("pd-trust", f"printf '{CLAUDE_TRUST_DIALOG}'; read -n1 x; echo; echo GOT=$x\n")
+    _wait_blocked("pd-trust")
+    before = Pty.snapshot("pd-trust")
+    policy = Policy(rules={"claude": "approve"}, default="approve")
+    assert PrimeDirective.enforce("pd-trust", policy) == "escalate"
+    time.sleep(0.3)
+    assert Pty.snapshot("pd-trust") == before, "trust dialog must never be auto-answered"

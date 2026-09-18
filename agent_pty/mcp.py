@@ -188,16 +188,20 @@ def mesh_send_with_done(
     done_marker: str = "<<END>>",
     timeout: float = 60.0,
 ) -> str:
-    """Send `text` to a session, wait for `done_marker`, return the reply.
+    """Send `text`, submit it with Enter, wait for `done_marker`, return the reply.
 
     Captain-Kirk protocol convention: prompt the sub-agent to terminate
     its reply with the marker (e.g. "Answer X. End your reply with
-    <<END>>"). The returned string is the reply text bounded by the
-    sent prompt and the marker, with leading/trailing whitespace
-    trimmed and the marker excluded.
+    <<END>>"). The returned string is the reply text that appeared AFTER
+    the echo of the sent text and before the marker, marker excluded,
+    trimmed. Trailing newlines in `text` are dropped and an Enter keystroke
+    is sent instead (the Claude Code TUI treats a typed newline as a line
+    break, not submit). A marker inside the echoed prompt, or left over from
+    an earlier reply, does not count.
 
     Use when driving another LLM CLI (or any program with a structured
-    reply) where you need to know reliably when the response is done.
+    reply) where you need to know reliably when the response is done. For
+    shell commands prefer sulu_dispatch, which frames the marker for you.
     """
     try:
         return Mesh.send_with_done(
@@ -653,8 +657,9 @@ def prime_directive_resolve(name: str, policy: str = "conservative") -> str:
     "none" -> pane is not blocked. "escalate" -> defer to the human (also:
     secrets, always). "approve"/"deny" -> a policy rule matched. `policy` is
     "conservative" (escalate everything; the safe baseline) or "permissive"
-    (auto-approve ordinary y/n / continue / approval prompts, still escalating
-    secrets and anything unmatched). Use this to preview a decision.
+    (auto-approve ordinary y/n / continue / approval prompts and Claude Code's
+    tool-permission dialog, still escalating secrets, folder-trust dialogs
+    and anything unmatched). Use this to preview a decision.
     """
     try:
         return PrimeDirective.resolve(name, _policy_for(policy))
@@ -666,15 +671,18 @@ def prime_directive_resolve(name: str, policy: str = "conservative") -> str:
 def prime_directive_enforce(
     name: str,
     policy: str = "conservative",
-    approve_keys: str = "y<Enter>",
-    deny_keys: str = "n<Enter>",
+    approve_keys: str | None = None,
+    deny_keys: str | None = None,
 ) -> str:
     """Resolve a decision for a blocked pane and ACT on it. Returns decision.
 
     "approve" sends `approve_keys`, "deny" sends `deny_keys`, "escalate"/"none"
-    do nothing (the human handles it). `policy` is "conservative" or
-    "permissive". A secrets prompt is ALWAYS escalated regardless of policy —
-    PrimeDirective never auto-answers a password/passphrase/2fa prompt. Use to
+    do nothing (the human handles it). Leave the keys None to pick them from
+    the prompt kind: Claude Code permission/trust dialogs get "1" (Yes) / Esc,
+    ordinary prompts get "y<Enter>" / "n<Enter>". `policy` is "conservative"
+    or "permissive" (permissive also approves Claude's tool-permission dialog).
+    A secrets prompt or a Claude folder-trust dialog is ALWAYS escalated
+    regardless of policy — PrimeDirective never auto-answers those. Use to
     clear benign approval prompts so the fleet keeps moving.
     """
     try:
@@ -1039,12 +1047,14 @@ def worf_review(
 ) -> str:
     """Review a target pane's content with an independent reviewer pane.
 
-    Spawns a reviewer pane (`reviewer_cmd=None` -> a plain shell; real use
-    passes e.g. "claude --print --output-format text"), captures the target's
-    content (full screen, or its last `lines` non-empty lines), asks the
-    reviewer to review it, and returns the verdict bounded by `done_marker`.
-    The reviewer is left running for follow-ups; call worf_dismiss to kill it.
-    Use for adversarial review of work produced in another pane.
+    Ensures a reviewer SHELL pane exists (spawned on first use, reused after),
+    captures the target's content (full screen, or its last `lines` non-empty
+    lines), writes the review prompt to a temp file and runs `reviewer_cmd`
+    with it on stdin (default "claude -p --output-format text"; any CLI that
+    reads a prompt from stdin works, e.g. "gemini" or "ollama run llama3"),
+    returning the command's output as the verdict. The reviewer pane is left
+    running for follow-ups; call worf_dismiss to kill it. Use for adversarial
+    review of work produced in another pane.
     """
     try:
         return Worf.review(

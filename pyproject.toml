@@ -1,6 +1,6 @@
 [project]
 name = "agent-pty"
-version = "0.1.0"
+version = "0.2.0"
 description = "Persistent PTY tool for LLM coding agents, tmux-backed"
 requires-python = ">=3.11"
 dependencies = [
@@ -27,4 +27,4 @@ testpaths = ["tests"]
 markers = [
     "manual: tests that require external services (e.g. real claude CLI); skipped by default in CI",
 ]
-addopts = "-m 'not manual'"
+addopts = "-m 'not manual' -p no:libtmux"
